@@ -313,8 +313,9 @@ class NabWeatherd(NabInfoService):
         if location is None:
             return None
 
-        latitude = location.get("lat")
-        longitude = location.get("lon")
+        # Support both old format (lat/lon) and Open-Meteo format (latitude/longitude)
+        latitude = location.get("lat") or location.get("latitude")
+        longitude = location.get("lon") or location.get("longitude")
 
         if not latitude or not longitude:
             logging.error(f"Invalid location data: {location}")
