@@ -8,7 +8,8 @@ mypy==0.950
 gunicorn==22.0.0
 lockfile==0.12.2
 Mastodon.py==1.5.1
-meteofrance-api==1.0.2
+# Open-Meteo client uses requests (already included below)
+# openmeteo-requests requires Python 3.8+, using direct requests for Python 3.7 compat
 mpg123==0.4
 psycopg2-binary==2.9.3
 pytest==7.0.1

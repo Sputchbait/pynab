@@ -4,11 +4,11 @@ import json
 from django.http import JsonResponse, QueryDict
 from django.shortcuts import render
 from django.views.generic import TemplateView
-from meteofrance_api.client import MeteoFranceClient, Place
 
 from . import rfid_data
 from .models import Config, ScheduledMessage
 from .nabweatherd import NabWeatherd
+from .openmeteo_client import OpenMeteoClient
 
 
 class SettingsView(TemplateView):
@@ -34,21 +34,25 @@ class SettingsView(TemplateView):
         context = self.get_context_data(**kwargs)
         if "q" in request.GET:
             search_location = request.GET["q"]
-            client = MeteoFranceClient()
-            list_places = client.search_places(search_location)
-            for one_place in list_places:
-                # correct bad json returned my MeteoFrance + admin is not
-                # always there
-                if "name" in one_place.raw_data:
-                    one_place.raw_data["name"] = one_place.raw_data[
-                        "name"
-                    ].replace("'", " ")
-                if "admin" in one_place.raw_data:
-                    one_place.raw_data["admin"] = one_place.raw_data[
-                        "admin"
-                    ].replace("'", " ")
-                json_item["value"] = str(one_place.raw_data)
-                json_item["text"] = one_place.__str__()
+            client = OpenMeteoClient()
+            list_places = client.get_geocoding(search_location)
+            for place in list_places:
+                location_data = {
+                    "name": place.get("name", ""),
+                    "lat": place.get("latitude"),
+                    "lon": place.get("longitude"),
+                    "country": place.get("country", ""),
+                    "admin1": place.get("admin1", ""),
+                    "timezone": place.get("timezone", ""),
+                }
+                display_parts = [place.get("name", "")]
+                if place.get("admin1"):
+                    display_parts.append(place.get("admin1"))
+                display_parts.append(place.get("country", ""))
+                display_text = ", ".join(display_parts)
+
+                json_item["value"] = json.dumps(location_data)
+                json_item["text"] = display_text
                 json_places.append(json_item)
                 json_item = {}
             return JsonResponse(json_places, status=200, safe=False)
@@ -63,9 +67,13 @@ class SettingsView(TemplateView):
                 location = location.replace("'", '"')
 
                 location_json = json.loads(location)
-                location_place = Place(location_json)
                 config.location = location_json
-                config.location_user_friendly = location_place.__str__()
+
+                display_parts = [location_json.get("name", "")]
+                if location_json.get("admin1"):
+                    display_parts.append(location_json.get("admin1"))
+                display_parts.append(location_json.get("country", ""))
+                config.location_user_friendly = ", ".join(display_parts)
 
         if "unit" in request.POST:
             unit = request.POST["unit"]

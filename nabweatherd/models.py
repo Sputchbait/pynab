@@ -5,15 +5,14 @@ from nabcommon import singleton_model
 
 
 def default_location():
+    """Default location using Open-Meteo format."""
     return dict(
-        insee="75056",
-        name="Paris 14",
-        lat=48.8331,
-        lon=2.3264,
-        country="FR",
-        admin="Île-de-France",
-        admin2="75",
-        postCode="75014",
+        name="Paris",
+        lat=48.8566,
+        lon=2.3522,
+        country="France",
+        admin1="Île-de-France",
+        timezone="Europe/Paris",
     )
 
 
@@ -21,7 +20,7 @@ class Config(singleton_model.SingletonModel):
     location = models.JSONField(null=True, default=default_location)
 
     location_user_friendly = models.TextField(
-        null=True, default="Paris 14 - Île-de-France (75) - FR"
+        null=True, default="Paris, Île-de-France, France"
     )
 
     unit = models.IntegerField(null=False, default=1)

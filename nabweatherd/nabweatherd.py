@@ -5,12 +5,13 @@ import sys
 
 from asgiref.sync import sync_to_async
 from dateutil import tz
-from meteofrance_api.client import MeteoFranceClient, Place
 
 from nabcommon.nabservice import NabInfoService
 from nabcommon.typing import NabdPacket
 
 from . import rfid_data
+from .openmeteo_client import OpenMeteoClient
+from .wmo_codes import get_weather_class, get_weather_description
 
 
 class NabWeatherd(NabInfoService):
@@ -128,106 +129,15 @@ class NabWeatherd(NabInfoService):
         '{"left":"ffff00","center":"0000ff","right":"000000"}]}'
     )
 
-    # Météo France weather classes
-    WEATHER_CLASSES = {
-        "Eclaircies": ("sunny", SUNNY_INFO_ANIMATION),
-        "Peu nuageux": ("sunny", SUNNY_INFO_ANIMATION),
-        "Ensoleillé": ("sunny", SUNNY_INFO_ANIMATION),
-        "Ciel voilé": ("cloudy", CLOUDY_INFO_ANIMATION),
-        "Ciel voilé nuit": ("cloudy", CLOUDY_INFO_ANIMATION),
-        "Très nuageux": ("cloudy", CLOUDY_INFO_ANIMATION),
-        "Couvert": ("cloudy", CLOUDY_INFO_ANIMATION),
-        "Rares averses": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Averses": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Pluies éparses": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Pluie": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Pluie modérée": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Pluie faible": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Pluie forte": (
-            "rainy",
-            RAINY_INFO_ANIMATION,
-        ),
-        "Risque de grêle": ("rainy", RAINY_INFO_ANIMATION),
-        "Risque de grèle": ("rainy", RAINY_INFO_ANIMATION),
-        "Bruine / Pluie faible": ("rainy", RAINY_INFO_ANIMATION),
-        "Bruine": ("rainy", RAINY_INFO_ANIMATION),
-        "Pluies éparses / Rares averses": ("rainy", RAINY_INFO_ANIMATION),
-        "Pluie / Averses": ("rainy", RAINY_INFO_ANIMATION),
-        "Pluie et neige mêlées": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Neige / Averses de neige": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Neige": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Averses de neige": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Neige forte": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Quelques flocons": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Pluie et neige": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Pluie verglaçante": (
-            "snowy",
-            SNOWY_INFO_ANIMATION,
-        ),
-        "Brume ou bancs de brouillard": (
-            "foggy",
-            FOGGY_INFO_ANIMATION,
-        ),
-        "Bancs de Brouillard": (
-            "foggy",
-            FOGGY_INFO_ANIMATION,
-        ),
-        "Brouillard": (
-            "foggy",
-            FOGGY_INFO_ANIMATION,
-        ),
-        "Brouillard givrant": (
-            "foggy",
-            FOGGY_INFO_ANIMATION,
-        ),
-        "Brume": (
-            "foggy",
-            FOGGY_INFO_ANIMATION,
-        ),
-        "Pluies orageuses": ("stormy", STORMY_INFO_ANIMATION),
-        "Pluie orageuses": ("stormy", STORMY_INFO_ANIMATION),
-        "Orages": ("stormy", STORMY_INFO_ANIMATION),
-        "Averses orageuses": ("stormy", STORMY_INFO_ANIMATION),
-        "Risque d'orages": ("stormy", STORMY_INFO_ANIMATION),
+    # Weather class to animation mapping
+    # WMO codes are converted to weather classes via wmo_codes.py
+    ANIMATION_MAP = {
+        "sunny": SUNNY_INFO_ANIMATION,
+        "cloudy": CLOUDY_INFO_ANIMATION,
+        "rainy": RAINY_INFO_ANIMATION,
+        "snowy": SNOWY_INFO_ANIMATION,
+        "foggy": FOGGY_INFO_ANIMATION,
+        "stormy": STORMY_INFO_ANIMATION,
     }
 
     weather_bedtime_done = False
@@ -403,44 +313,54 @@ class NabWeatherd(NabInfoService):
         if location is None:
             return None
 
-        place = Place(location)
+        latitude = location.get("lat")
+        longitude = location.get("lon")
 
-        client = await sync_to_async(MeteoFranceClient)()
-        try:
-            my_place_weather_forecast = client.get_forecast_for_place(place)
-            data = my_place_weather_forecast.daily_forecast
-            logging.debug(f"data: {data}")
-        except Exception as err:
-            logging.error(f"{err}")
+        if not latitude or not longitude:
+            logging.error(f"Invalid location data: {location}")
             return None
 
-        # Rain info
+        client = OpenMeteoClient()
+        try:
+            forecast = await sync_to_async(client.get_forecast_for_place)(
+                latitude, longitude
+            )
+            logging.debug(f"Open-Meteo forecast: {forecast}")
+        except Exception as err:
+            logging.error(f"Failed to fetch weather data: {err}")
+            return None
+
+        # Rain info - check current precipitation
         next_rain = False
         try:
-            raininfo = client.get_rain(place.latitude, place.longitude)
-            logging.debug(f"rain forecast: {raininfo.forecast}")
-            for five_min_slots in raininfo.forecast:
-                if five_min_slots["rain"] != 1:
+            current_precip = forecast.get("current", {}).get("precipitation", 0)
+            if current_precip > 0:
+                next_rain = True
+            else:
+                # Check next few hours of daily precipitation probability
+                daily_precip_prob = forecast.get("daily", {}).get(
+                    "precipitation_probability_max", []
+                )
+                if daily_precip_prob and daily_precip_prob[0] > 50:
                     next_rain = True
-                    break
         except Exception as err:
-            logging.error(f"{err}")
+            logging.error(f"Failed to get rain info: {err}")
             next_rain = False
-            # todo : prevenir que les infos de rain ne sont pas dispo
 
-        current_weather_class = self.normalize_weather_class(
-            data[0]["weather12H"]["desc"]
-        )
-        today_forecast_weather_class = self.normalize_weather_class(
-            data[0]["weather12H"]["desc"]
-        )
+        # Current weather from current data
+        current_wmo = forecast.get("current", {}).get("weather_code", 3)
+        current_weather_class = get_weather_class(current_wmo)
 
-        today_forecast_max_temp = int(data[0]["T"]["max"])
+        # Today forecast from daily data (first day)
+        daily = forecast.get("daily", {})
+        today_wmo = daily.get("weather_code", [3])[0]
+        today_forecast_weather_class = get_weather_class(today_wmo)
+        today_forecast_max_temp = int(daily.get("temperature_2m_max", [20])[0])
 
-        tomorrow_forecast_weather_class = self.normalize_weather_class(
-            data[1]["weather12H"]["desc"]
-        )
-        tomorrow_forecast_max_temp = int(data[0]["T"]["max"])
+        # Tomorrow forecast from daily data (second day)
+        tomorrow_wmo = daily.get("weather_code", [3])[1] if len(daily.get("weather_code", [])) > 1 else 3
+        tomorrow_forecast_weather_class = get_weather_class(tomorrow_wmo)
+        tomorrow_forecast_max_temp = int(daily.get("temperature_2m_max", [20])[1]) if len(daily.get("temperature_2m_max", [])) > 1 else 20
 
         return {
             "weather_animation_type": weather_animation_type,
@@ -453,10 +373,11 @@ class NabWeatherd(NabInfoService):
         }
 
     def normalize_weather_class(self, weather_class):
-        if weather_class in NabWeatherd.WEATHER_CLASSES:
+        """Validate weather class is in expected set."""
+        if weather_class in NabWeatherd.ANIMATION_MAP:
             return weather_class
         logging.warning(f"unexpected weather class: {weather_class}")
-        return None
+        return "cloudy"
 
     def get_animation(self, info_data):
 
@@ -490,9 +411,10 @@ class NabWeatherd(NabInfoService):
                 packet = '{"type":"info",' '"info_id":"nabweatherd_rain"}\r\n'
                 self.writer.write(packet.encode("utf8"))
 
-            (weather_class, info_animation) = NabWeatherd.WEATHER_CLASSES[
-                info_data["today_forecast_weather_class"]
-            ]
+            weather_class = info_data["today_forecast_weather_class"]
+            info_animation = NabWeatherd.ANIMATION_MAP.get(
+                weather_class, NabWeatherd.CLOUDY_INFO_ANIMATION
+            )
             return info_animation
 
         if info_data["weather_animation_type"] == "nothing":
@@ -533,14 +455,16 @@ class NabWeatherd(NabInfoService):
             self.writer.write(packet.encode("utf8"))
         else:
             if type == "today":
-                (weather_class, info_animation) = NabWeatherd.WEATHER_CLASSES[
-                    info_data["today_forecast_weather_class"]
-                ]
+                weather_class = info_data["today_forecast_weather_class"]
+                info_animation = NabWeatherd.ANIMATION_MAP.get(
+                    weather_class, NabWeatherd.CLOUDY_INFO_ANIMATION
+                )
                 max_temp = info_data["today_forecast_max_temp"]
             elif type == "tomorrow":
-                (weather_class, info_animation) = NabWeatherd.WEATHER_CLASSES[
-                    info_data["tomorrow_forecast_weather_class"]
-                ]
+                weather_class = info_data["tomorrow_forecast_weather_class"]
+                info_animation = NabWeatherd.ANIMATION_MAP.get(
+                    weather_class, NabWeatherd.CLOUDY_INFO_ANIMATION
+                )
                 max_temp = info_data["tomorrow_forecast_max_temp"]
             else:
                 logging.debug(f"Unknown type {type}")
