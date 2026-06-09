@@ -111,3 +111,4 @@ tmp/
 
 # nabblockly subdirectory
 /nabblockly/
+*.sqlite
