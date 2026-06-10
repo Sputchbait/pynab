@@ -1,0 +1,14 @@
+{% load i18n %}
+<div class="rfid-data-form" id="nabmqttd-rfid-data">
+  <form>
+    {% csrf_token %}
+    <div class="form-group row">
+      <label for="eventName" class="col-6 col-form-label">{% trans "MQTT Event Name" %}</label>
+      <div class="col-6">
+        <input id="eventName" name="event_name" type="text" class="form-control" placeholder="{% trans "e.g. morning_routine" %}" value="{{ event_name }}">
+        <small class="form-text text-muted">{% trans "Published to MQTT when this tag is detected" %}</small>
+      </div>
+    </div>
+    <input name="mqtt_uid" type="hidden" value="{{ mqtt_uid }}" />
+  </form>
+</div>

@@ -1,0 +1,21 @@
+from django.db import models
+
+from nabcommon import singleton_model
+
+
+class Config(singleton_model.SingletonModel):
+    broker_host = models.CharField(max_length=255, default="192.168.1.195")
+    broker_port = models.IntegerField(default=1883)
+    broker_username = models.CharField(max_length=255, blank=True, default="")
+    broker_password = models.CharField(max_length=255, blank=True, default="")
+    topic_prefix = models.CharField(max_length=255, default="nabaztag")
+    enabled = models.BooleanField(default=False)
+    publish_button_events = models.BooleanField(default=True)
+    publish_rfid_events = models.BooleanField(default=True)
+    publish_ears_state = models.BooleanField(default=True)
+    publish_led_state = models.BooleanField(default=True)
+    client_id = models.CharField(max_length=255, default="nabaztag_aaron")
+    json_data_base = models.TextField(null=True, default="{}")
+
+    class Meta:
+        app_label = "nabmqttd"
