@@ -16,7 +16,9 @@ import asyncio
 import datetime
 import json
 import logging
+import os
 import sys
+import tempfile
 from typing import Any, Dict
 
 import paho.mqtt.client as mqtt
@@ -232,6 +234,7 @@ class NabMqttd(NabService):
             (f"{self.config.topic_prefix}/ears/set_left", self.QOS_COMMAND),
             (f"{self.config.topic_prefix}/ears/set_right", self.QOS_COMMAND),
             (f"{self.config.topic_prefix}/leds/set", self.QOS_COMMAND),
+            (f"{self.config.topic_prefix}/tts/say", self.QOS_COMMAND),
         ]
 
         for topic, qos in topics:
@@ -308,7 +311,6 @@ class NabMqttd(NabService):
                 # LED color: {"color": "RRGGBB"}
                 if isinstance(data, dict):
                     color = self._validate_color(data.get("color", "000000"))
-                    # Convert to nabd info packet format
                     nabd_packet = {
                         "type": "info",
                         "info_id": "nabmqttd",
@@ -323,6 +325,12 @@ class NabMqttd(NabService):
                             ]
                         }
                     }
+
+            elif relative_topic == "tts/say":
+                await self._handle_tts(data)
+                self.message_count += 1
+                self.last_activity = datetime.datetime.now()
+                return
 
             # Send to nabd if packet was created
             if nabd_packet:
@@ -364,6 +372,51 @@ class NabMqttd(NabService):
             return "000000"
 
         return color
+
+    async def _handle_tts(self, data):
+        """
+        Generate TTS audio and play via nabd.
+
+        Accepts: {"text": "...", "lang": "en"} or plain string
+        """
+        if isinstance(data, str):
+            text = data
+            lang = "en"
+        elif isinstance(data, dict):
+            text = data.get("text", "")
+            lang = data.get("lang", "en")
+        else:
+            logging.warning(f"Invalid TTS payload: {data}")
+            return
+
+        if not text:
+            return
+
+        try:
+            loop = asyncio.get_event_loop()
+            mp3_path = await loop.run_in_executor(None, self._generate_tts_audio, text, lang)
+            if mp3_path:
+                nabd_packet = {
+                    "type": "command",
+                    "sequence": [{"audio": [mp3_path]}]
+                }
+                await self._send_to_nabd(nabd_packet)
+                logging.info(f"TTS playing: '{text[:50]}' ({lang})")
+        except Exception as e:
+            logging.error(f"TTS failed: {e}")
+
+    TTS_SOUND_DIR = "/opt/pynab/nabmqttd/sounds"
+    TTS_FILENAME = "tts_output.mp3"
+
+    def _generate_tts_audio(self, text: str, lang: str) -> str:
+        """Generate MP3 from text using gTTS. Runs in executor thread."""
+        from gtts import gTTS
+
+        os.makedirs(self.TTS_SOUND_DIR, exist_ok=True)
+        mp3_path = os.path.join(self.TTS_SOUND_DIR, self.TTS_FILENAME)
+        tts = gTTS(text=text, lang=lang)
+        tts.save(mp3_path)
+        return self.TTS_FILENAME
 
     async def _send_to_nabd(self, packet: Dict[str, Any]):
         """
@@ -614,6 +667,20 @@ class NabMqttd(NabService):
                 "value_template": "{{ 'ON' if value_json.status == 'online' else 'OFF' }}",
                 "device_class": "connectivity",
                 "icon": "mdi:wifi",
+                "device": device_info
+            }
+        )
+
+        # TTS text input
+        await self._publish_discovery_config(
+            "text", "tts",
+            {
+                "name": "Nabaztag TTS",
+                "unique_id": "nabaztag_tts",
+                "command_topic": f"{self.config.topic_prefix}/tts/say",
+                "min": 1,
+                "max": 255,
+                "icon": "mdi:text-to-speech",
                 "device": device_info
             }
         )
