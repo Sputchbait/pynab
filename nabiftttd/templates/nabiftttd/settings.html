@@ -1,6 +1,6 @@
 {% load i18n %}
 <div class="card" id="nabiftttd-settings">
-  <form action="/nabiftttd/settings">
+  <form action="/nabiftttd/settings" method="POST">
     {% csrf_token %}
   <div class="card-header">
     <h5 class="card-title">{% trans "If This Then That" %}</h5>

@@ -1,6 +1,6 @@
 {% load i18n %}
 <div class="card" id="nabtaichid-settings">
-  <form action="/nabtaichid/settings">
+  <form action="/nabtaichid/settings" method="POST">
     {% csrf_token %}
     <div class="card-header">
       <h5 class="card-title">{% trans "Tai chi" %}</h5>
