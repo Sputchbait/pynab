@@ -41,7 +41,9 @@ class SettingsView(TemplateView):
             config.broker_username = request.POST["broker_username"]
 
         if "broker_password" in request.POST:
-            config.broker_password = request.POST["broker_password"]
+            password = request.POST["broker_password"]
+            if password:
+                config.broker_password = password
 
         if "topic_prefix" in request.POST:
             config.topic_prefix = request.POST["topic_prefix"]
@@ -49,11 +51,11 @@ class SettingsView(TemplateView):
         if "client_id" in request.POST:
             config.client_id = request.POST["client_id"]
 
-        config.enabled = "enabled" in request.POST
-        config.publish_button_events = "publish_button_events" in request.POST
-        config.publish_rfid_events = "publish_rfid_events" in request.POST
-        config.publish_ears_state = "publish_ears_state" in request.POST
-        config.publish_led_state = "publish_led_state" in request.POST
+        config.enabled = request.POST.get("enabled") == "true"
+        config.publish_button_events = request.POST.get("publish_button_events") == "true"
+        config.publish_rfid_events = request.POST.get("publish_rfid_events") == "true"
+        config.publish_ears_state = request.POST.get("publish_ears_state") == "true"
+        config.publish_led_state = request.POST.get("publish_led_state") == "true"
 
         config.save()
 

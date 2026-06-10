@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import sys
-import tempfile
+import uuid
 from typing import Any, Dict
 
 import paho.mqtt.client as mqtt
@@ -61,7 +61,6 @@ class NabMqttd(NabService):
 
         # State tracking (for retained messages)
         self.current_ears_state = {"left": 0, "right": 0}
-        self.current_leds_state = {"color": "000000"}
 
         # Last activity tracking
         self.last_activity = datetime.datetime.now()
@@ -262,18 +261,22 @@ class NabMqttd(NabService):
         """
         try:
             # Strip topic prefix
-            relative_topic = topic.replace(f"{self.config.topic_prefix}/", "")
+            prefix = f"{self.config.topic_prefix}/"
+            if topic.startswith(prefix):
+                relative_topic = topic[len(prefix):]
+            else:
+                relative_topic = topic
 
             # Parse payload
             try:
                 data = json.loads(payload.decode("utf-8"))
-            except json.JSONDecodeError:
-                # Try as plain number (for single-value topics)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Try as plain number, then fall back to raw string
+                raw = payload.decode("utf-8", errors="replace").strip()
                 try:
-                    data = int(payload.decode("utf-8").strip())
+                    data = int(raw)
                 except ValueError:
-                    logging.warning(f"Invalid payload format: {payload}")
-                    return
+                    data = raw
 
             # Translate to nabd packet
             nabd_packet = None
@@ -343,9 +346,12 @@ class NabMqttd(NabService):
         except Exception as e:
             logging.error(f"Error handling MQTT command: {e}", exc_info=True)
 
-    def _clamp_ear(self, value: int) -> int:
+    def _clamp_ear(self, value) -> int:
         """Clamp ear position to valid range 0-16."""
-        return max(0, min(16, int(value)))
+        try:
+            return max(0, min(16, int(value)))
+        except (TypeError, ValueError):
+            return 0
 
     def _validate_color(self, color: str) -> str:
         """
@@ -402,21 +408,31 @@ class NabMqttd(NabService):
                 }
                 await self._send_to_nabd(nabd_packet)
                 logging.info(f"TTS playing: '{text[:50]}' ({lang})")
+                self._cleanup_old_tts_files(mp3_path)
         except Exception as e:
             logging.error(f"TTS failed: {e}")
 
     TTS_SOUND_DIR = "/opt/pynab/nabmqttd/sounds"
-    TTS_FILENAME = "tts_output.mp3"
 
     def _generate_tts_audio(self, text: str, lang: str) -> str:
         """Generate MP3 from text using gTTS. Runs in executor thread."""
         from gtts import gTTS
 
         os.makedirs(self.TTS_SOUND_DIR, exist_ok=True)
-        mp3_path = os.path.join(self.TTS_SOUND_DIR, self.TTS_FILENAME)
+        filename = f"tts_{uuid.uuid4().hex[:8]}.mp3"
+        mp3_path = os.path.join(self.TTS_SOUND_DIR, filename)
         tts = gTTS(text=text, lang=lang)
         tts.save(mp3_path)
-        return self.TTS_FILENAME
+        return filename
+
+    def _cleanup_old_tts_files(self, keep_filename: str):
+        """Remove old TTS files, keeping only the most recent."""
+        try:
+            for f in os.listdir(self.TTS_SOUND_DIR):
+                if f.startswith("tts_") and f.endswith(".mp3") and f != keep_filename:
+                    os.remove(os.path.join(self.TTS_SOUND_DIR, f))
+        except OSError:
+            pass
 
     async def _send_to_nabd(self, packet: Dict[str, Any]):
         """
