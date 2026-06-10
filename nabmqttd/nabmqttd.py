@@ -398,6 +398,11 @@ class NabMqttd(NabService):
         if not text:
             return
 
+        max_length = 500
+        if len(text) > max_length:
+            text = text[:max_length]
+            logging.warning(f"TTS text truncated to {max_length} characters")
+
         try:
             loop = asyncio.get_event_loop()
             mp3_path = await loop.run_in_executor(None, self._generate_tts_audio, text, lang)
