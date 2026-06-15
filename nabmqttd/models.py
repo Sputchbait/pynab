@@ -17,5 +17,10 @@ class Config(singleton_model.SingletonModel):
     client_id = models.CharField(max_length=255, default="nabaztag_aaron")
     json_data_base = models.TextField(null=True, default="{}")
 
+    # Phase 2: Voice recognition options
+    enable_voice = models.BooleanField(default=False)
+    voice_on_button = models.BooleanField(default=True)
+    asr_language = models.CharField(max_length=5, default="en_US")
+
     class Meta:
         app_label = "nabmqttd"
