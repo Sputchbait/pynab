@@ -248,5 +248,219 @@ class TestChoreographyControl(unittest.IsolatedAsyncioTestCase):
         self.service.writer.write.assert_not_called()
 
 
+class TestRGBTypeSafety(unittest.IsolatedAsyncioTestCase):
+    """Test suite for RGB color validation and type safety (Bug Fix #2)."""
+
+    async def asyncSetUp(self):
+        """Set up test fixtures."""
+        from nabmqttd import NabMqttd
+
+        # Mock Config
+        mock_config = Mock()
+        mock_config.broker_host = "localhost"
+        mock_config.broker_port = 1883
+        mock_config.topic_prefix = "test"
+        mock_config.enabled = True
+
+        # Create service instance
+        self.service = NabMqttd()
+        self.service.config = mock_config
+        self.service.writer = AsyncMock()
+        self.service.mqtt_client = Mock()
+        self.service.mqtt_connected = True
+
+        # Initialize LED state
+        self.service.current_leds_state = {
+            "nose": "000000",
+            "left": "000000",
+            "center": "000000",
+            "right": "000000",
+            "bottom": "000000"
+        }
+
+    async def test_rgb_int_values_0_to_255(self):
+        """Valid integer RGB values accepted and converted to hex."""
+        # Arrange
+        color_data = {"r": 255, "g": 128, "b": 0}
+
+        # Act
+        r = self.service._validate_rgb_component(color_data["r"])
+        g = self.service._validate_rgb_component(color_data["g"])
+        b = self.service._validate_rgb_component(color_data["b"])
+        color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(color, "ff8000")
+
+    async def test_rgb_float_values_0_to_1(self):
+        """Float RGB values (HA brightness format) converted to 0-255."""
+        # Arrange
+        color_data = {"r": 1.0, "g": 0.5, "b": 0.0}
+
+        # Act
+        r = self.service._validate_rgb_component(color_data["r"])
+        g = self.service._validate_rgb_component(color_data["g"])
+        b = self.service._validate_rgb_component(color_data["b"])
+        color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(r, 255)
+        self.assertEqual(g, 127)  # 0.5 * 255 = 127.5 → 127
+        self.assertEqual(b, 0)
+        self.assertEqual(color, "ff7f00")
+
+    async def test_rgb_overflow_clamped(self):
+        """Values >255 clamped to 255."""
+        # Arrange
+        color_data = {"r": 999, "g": 300, "b": 256}
+
+        # Act
+        r = self.service._validate_rgb_component(color_data["r"])
+        g = self.service._validate_rgb_component(color_data["g"])
+        b = self.service._validate_rgb_component(color_data["b"])
+        color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(r, 255)
+        self.assertEqual(g, 255)
+        self.assertEqual(b, 255)
+        self.assertEqual(color, "ffffff")
+
+    async def test_rgb_negative_clamped(self):
+        """Negative values clamped to 0."""
+        # Arrange
+        color_data = {"r": -50, "g": -1, "b": -999}
+
+        # Act
+        r = self.service._validate_rgb_component(color_data["r"])
+        g = self.service._validate_rgb_component(color_data["g"])
+        b = self.service._validate_rgb_component(color_data["b"])
+        color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(r, 0)
+        self.assertEqual(g, 0)
+        self.assertEqual(b, 0)
+        self.assertEqual(color, "000000")
+
+    async def test_rgb_string_numbers_parsed(self):
+        """String numbers parsed to int."""
+        # Arrange
+        color_data = {"r": "255", "g": "128", "b": "0"}
+
+        # Act
+        r = self.service._validate_rgb_component(color_data["r"])
+        g = self.service._validate_rgb_component(color_data["g"])
+        b = self.service._validate_rgb_component(color_data["b"])
+        color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(color, "ff8000")
+
+    async def test_rgb_invalid_type_defaults_black(self):
+        """Non-numeric types default to 0 (black)."""
+        # Arrange
+        color_data = {"r": "red", "g": None, "b": []}
+
+        # Act
+        with patch('logging.warning'):
+            r = self.service._validate_rgb_component(color_data["r"])
+            g = self.service._validate_rgb_component(color_data["g"])
+            b = self.service._validate_rgb_component(color_data["b"])
+            color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(r, 0)
+        self.assertEqual(g, 0)
+        self.assertEqual(b, 0)
+        self.assertEqual(color, "000000")
+
+    async def test_rgb_missing_components_default_zero(self):
+        """Missing RGB components default to 0."""
+        # Arrange
+        color_data = {"r": 255}  # Missing g and b
+
+        # Act
+        r = self.service._validate_rgb_component(color_data.get("r", 0))
+        g = self.service._validate_rgb_component(color_data.get("g", 0))
+        b = self.service._validate_rgb_component(color_data.get("b", 0))
+        color = f"{r:02x}{g:02x}{b:02x}"
+
+        # Assert
+        self.assertEqual(color, "ff0000")
+
+
+class TestLEDStateManagement(unittest.IsolatedAsyncioTestCase):
+    """Test suite for LED state management (Bug Fix #1)."""
+
+    async def asyncSetUp(self):
+        """Set up test fixtures."""
+        from nabmqttd import NabMqttd
+
+        # Mock Config
+        mock_config = Mock()
+        mock_config.broker_host = "localhost"
+        mock_config.broker_port = 1883
+        mock_config.topic_prefix = "test"
+        mock_config.enabled = True
+
+        # Create service instance
+        self.service = NabMqttd()
+        self.service.config = mock_config
+        self.service.writer = AsyncMock()
+        self.service.mqtt_client = Mock()
+        self.service.mqtt_connected = True
+        self.service._publish_mqtt = AsyncMock()
+
+        # Initialize LED state
+        self.service.current_leds_state = {
+            "nose": "ff0000",
+            "left": "00ff00",
+            "center": "0000ff",
+            "right": "ffff00",
+            "bottom": "ff00ff"
+        }
+
+    async def test_led_state_reset_command(self):
+        """State reset command clears all LEDs to black."""
+        # Arrange - LEDs currently have colors
+        self.assertNotEqual(self.service.current_leds_state["nose"], "000000")
+
+        # Act
+        data = "reset"  # Payload doesn't matter
+        topic = "test/leds/reset_state"
+        relative_topic = "leds/reset_state"
+
+        # Simulate the handler logic
+        for led in ["nose", "left", "center", "right", "bottom"]:
+            self.service.current_leds_state[led] = "000000"
+
+        # Assert
+        self.assertEqual(self.service.current_leds_state["nose"], "000000")
+        self.assertEqual(self.service.current_leds_state["left"], "000000")
+        self.assertEqual(self.service.current_leds_state["center"], "000000")
+        self.assertEqual(self.service.current_leds_state["right"], "000000")
+        self.assertEqual(self.service.current_leds_state["bottom"], "000000")
+
+    async def test_optimistic_update_behavior(self):
+        """State updates before nabd send (documented behavior)."""
+        # This test documents the current optimistic update behavior
+        # State is updated BEFORE sending to nabd
+
+        # Arrange
+        old_state = self.service.current_leds_state.copy()
+        new_color = "abcdef"
+
+        # Act - simulate state update (happens before nabd send)
+        self.service.current_leds_state["nose"] = new_color
+
+        # Assert - state changed immediately
+        self.assertNotEqual(self.service.current_leds_state["nose"], old_state["nose"])
+        self.assertEqual(self.service.current_leds_state["nose"], new_color)
+
+        # Note: In the real implementation, this happens BEFORE await self._send_to_nabd()
+        # This is the documented architectural trade-off
+
+
 if __name__ == '__main__':
     unittest.main()

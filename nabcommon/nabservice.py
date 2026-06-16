@@ -74,7 +74,9 @@ class NabService(ABC):
                     + events_str
                     + "]}\r\n"
                 )
-                self.writer.write(idle_packet.encode("utf8"))
+                # Check writer is connected before writing
+                if self.writer is not None:
+                    self.writer.write(idle_packet.encode("utf8"))
             while self.running and not self.reader.at_eof():
                 line = await self.reader.readline()
                 if line != b"" and line != b"\r\n":
@@ -134,11 +136,15 @@ class NabService(ABC):
         except KeyboardInterrupt:
             pass
         finally:
-            self.writer.close()
+            if self.writer is not None:
+                self.writer.close()
             self.loop.run_until_complete(self.stop_service_loop())
             tasks = asyncio.all_tasks(self.loop)
+            # Filter out current task to prevent waiting on self (Python 3.9+)
+            current_task = asyncio.current_task(self.loop)
+            tasks_to_wait = [t for t in tasks if t != current_task and not (t.done() or t.cancelled())]
             # give canceled tasks the last chance to run
-            for t in [t for t in tasks if not (t.done() or t.cancelled())]:
+            for t in tasks_to_wait:
                 self.loop.run_until_complete(t)
             self.loop.close()
 
@@ -479,7 +485,11 @@ class NabInfoService(NabRecurrentService, ABC):
             info_packet = (
                 '{"type":"info","info_id":"' + service_name + '"}\r\n'
             )
-        self.writer.write(info_packet.encode("utf8"))
+        # Check writer is still connected before writing
+        if self.writer is not None:
+            self.writer.write(info_packet.encode("utf8"))
+        else:
+            logging.warning(f"{service_name}: Cannot send info packet, writer disconnected")
         if type != "info":
             await self.perform_additional(
                 expiration_date, type, info_data, config

@@ -255,6 +255,7 @@ class NabMqttd(NabService):
             (f"{self.config.topic_prefix}/voice/listen", self.QOS_COMMAND),
             # Code review fixes: Per-LED control and choreography
             (f"{self.config.topic_prefix}/leds/set_individual", self.QOS_COMMAND),
+            (f"{self.config.topic_prefix}/leds/reset_state", self.QOS_COMMAND),
             (f"{self.config.topic_prefix}/choreography/play", self.QOS_COMMAND),
             # Individual LED control topics for HA light entities
             (f"{self.config.topic_prefix}/leds/nose/set", self.QOS_COMMAND),
@@ -291,6 +292,12 @@ class NabMqttd(NabService):
             payload: MQTT message payload (JSON or plain number)
         """
         try:
+            # SECURITY: Reject oversized payloads to prevent memory exhaustion
+            MAX_PAYLOAD_SIZE = 1024 * 1024  # 1MB limit
+            if len(payload) > MAX_PAYLOAD_SIZE:
+                logging.error(f"Payload too large: {len(payload)} bytes (max {MAX_PAYLOAD_SIZE}), rejecting")
+                return
+
             # Strip topic prefix
             prefix = f"{self.config.topic_prefix}/"
             if topic.startswith(prefix):
@@ -304,14 +311,30 @@ class NabMqttd(NabService):
 
             # Parse payload
             try:
-                data = json.loads(payload.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
+                payload_str = payload.decode("utf-8")  # Strict UTF-8, no error replacement
+                data = json.loads(payload_str)
+            except UnicodeDecodeError as e:
+                logging.error(f"Invalid UTF-8 in payload: {e}")
+                return
+            except json.JSONDecodeError:
                 # Try as plain number, then fall back to raw string
-                raw = payload.decode("utf-8", errors="replace").strip()
                 try:
-                    data = int(raw)
-                except ValueError:
-                    data = raw
+                    payload_str = payload.decode("utf-8", errors="replace")
+                    raw = payload_str.strip()
+                    if not raw:
+                        logging.warning("Empty payload received")
+                        return
+                    try:
+                        data = int(raw)
+                    except ValueError:
+                        # Limit string length
+                        if len(raw) > 1000:
+                            logging.error(f"String payload too long: {len(raw)} chars (max 1000)")
+                            return
+                        data = raw
+                except UnicodeDecodeError as e:
+                    logging.error(f"Invalid UTF-8 in payload: {e}")
+                    return
 
             # Translate to nabd packet
             nabd_packet = None
@@ -373,6 +396,10 @@ class NabMqttd(NabService):
 
             elif relative_topic == "leds/set_individual":
                 # Per-LED control: {"nose": "RRGGBB", "left": "RRGGBB", ...}
+                # OPTIMISTIC UPDATE: State is updated before nabd confirmation.
+                # This follows Pynab's stateless architecture where commands are
+                # fire-and-forget. In rare cases (nabd rejection, network error),
+                # state may desync. Use 'leds/reset_state' topic to manually correct.
                 if isinstance(data, dict):
                     nabd_packet = self._build_per_led_packet(data)
                     logging.info(f"Setting individual LED colors: {data}")
@@ -382,14 +409,37 @@ class NabMqttd(NabService):
                             self.current_leds_state[led] = self._validate_color(data[led])
                     await self._publish_leds_state()
 
+            elif relative_topic == "leds/reset_state":
+                # Manual state reset command for desync recovery
+                logging.info("Resetting LED state to black (000000)")
+                for led in ["nose", "left", "center", "right", "bottom"]:
+                    self.current_leds_state[led] = "000000"
+
+                # Send command to nabd to actually turn off LEDs
+                nabd_packet = self._build_per_led_packet(self.current_leds_state)
+                await self._send_to_nabd(nabd_packet)
+
+                # Publish updated state to MQTT/HA
+                await self._publish_leds_state()
+                self.message_count += 1
+                self.last_activity = datetime.datetime.now()
+                return
+
             elif relative_topic.startswith("leds/") and relative_topic.endswith("/set"):
                 # Individual LED control from HA: leds/nose/set, leds/left/set, etc.
-                led_name = relative_topic.split("/")[1]  # Extract led name
-                if led_name in ["nose", "left", "center", "right", "bottom"]:
-                    await self._handle_single_led(led_name, data)
-                    self.message_count += 1
-                    self.last_activity = datetime.datetime.now()
-                    return
+                # Bounds check: ensure topic has correct structure
+                parts = relative_topic.split("/")
+                if len(parts) == 3 and parts[0] == "leds" and parts[2] == "set":
+                    led_name = parts[1]
+                    if led_name in ["nose", "left", "center", "right", "bottom"]:
+                        await self._handle_single_led(led_name, data)
+                        self.message_count += 1
+                        self.last_activity = datetime.datetime.now()
+                        return
+                    else:
+                        logging.warning(f"Invalid LED name in topic: {led_name}")
+                else:
+                    logging.warning(f"Malformed LED topic structure: {relative_topic}")
 
             elif relative_topic == "tts/say":
                 await self._handle_tts(data)
@@ -481,6 +531,44 @@ class NabMqttd(NabService):
 
         return color
 
+    def _validate_rgb_component(self, value) -> int:
+        """
+        Validate and clamp RGB component to [0, 255] range.
+
+        Accepts:
+        - Integers: 0-255 (standard RGB format)
+        - Floats: 0.0-1.0 (Home Assistant brightness format)
+        - Strings: "255" (parsed to int)
+
+        Returns:
+            Clamped integer in [0, 255] range
+            0 on any error (defaults to black component)
+
+        Examples:
+            255 → 255
+            999 → 255 (clamped)
+            -50 → 0 (clamped)
+            1.0 → 255 (float brightness)
+            0.5 → 127 (float brightness)
+            "128" → 128 (string parsed)
+            "red" → 0 (invalid, defaults to 0)
+        """
+        try:
+            # Handle float brightness from Home Assistant
+            if isinstance(value, float):
+                # Clamp float to [0.0, 1.0] range first, then convert
+                # This handles edge cases like 1.001 correctly
+                clamped = max(0.0, min(1.0, value))
+                return int(clamped * 255)
+
+            # Convert to int and clamp to valid range [0, 255]
+            val = int(value)
+            return max(0, min(255, val))
+
+        except (TypeError, ValueError) as e:
+            logging.warning(f"Invalid RGB value '{value}': {e}, defaulting to 0")
+            return 0
+
     def _build_per_led_packet(self, led_colors: dict) -> dict:
         """
         Build nabd info packet for per-LED control.
@@ -531,6 +619,11 @@ class NabMqttd(NabService):
             led_name: LED identifier (nose, left, center, right, bottom)
             data: JSON payload with 'state' and 'color' fields from HA
         """
+        # Type validation: ensure data is a dict
+        if not isinstance(data, dict):
+            logging.warning(f"Invalid data type for LED {led_name}: {type(data).__name__}, expected dict")
+            return
+
         if isinstance(data, dict):
             # HA sends {"state": "ON", "color": {"r": 255, "g": 0, "b": 0}}
             state = data.get("state", "ON")
@@ -539,14 +632,18 @@ class NabMqttd(NabService):
             else:
                 color_data = data.get("color", {})
                 if "r" in color_data and "g" in color_data and "b" in color_data:
-                    r = int(color_data["r"])
-                    g = int(color_data["g"])
-                    b = int(color_data["b"])
+                    # Type-safe RGB validation with bounds checking
+                    r = self._validate_rgb_component(color_data.get("r", 0))
+                    g = self._validate_rgb_component(color_data.get("g", 0))
+                    b = self._validate_rgb_component(color_data.get("b", 0))
                     color = f"{r:02x}{g:02x}{b:02x}"
                 else:
                     color = "000000"
 
-            # Update this LED only
+            # OPTIMISTIC UPDATE: State is updated before nabd confirmation.
+            # This follows Pynab's stateless architecture where commands are
+            # fire-and-forget. In rare cases (nabd rejection, network error),
+            # state may desync. Use 'leds/reset_state' topic to manually correct.
             self.current_leds_state[led_name] = color
 
             # Build and send nabd packet
@@ -691,21 +788,52 @@ class NabMqttd(NabService):
                 logging.warning(f"Invalid audio play data: {type(data)}")
                 return
 
-            if not url:
-                logging.warning("Empty audio URL")
+            if not url or len(url) > 2048:
+                logging.warning(f"Invalid or oversized audio URL (max 2048 chars)")
                 return
 
             # Validate URL format
             if url.startswith("http://") or url.startswith("https://"):
-                # Valid HTTP/HTTPS URL
+                # SECURITY: Validate HTTP/HTTPS URLs
                 parsed = urlparse(url)
                 if not parsed.netloc:
                     raise ValueError(f"Invalid URL: {url}")
-            elif url.startswith("/"):
-                # Local file path - validate it exists
-                if not os.path.exists(url):
-                    logging.warning(f"Local audio file not found: {url}")
+
+                # SECURITY: Check domain whitelist (prevent SSRF to internal services)
+                # Config setting: allowed_audio_domains (comma-separated)
+                # Use "*" to allow all domains (less secure but enables external audio)
+                allowed_domains_str = self.config.allowed_audio_domains.strip()
+                if allowed_domains_str and allowed_domains_str != "*":
+                    allowed_domains = [d.strip() for d in allowed_domains_str.split(",")]
+                    if parsed.hostname and parsed.hostname not in allowed_domains:
+                        logging.error(f"Domain not in whitelist: {parsed.hostname}. Allowed: {allowed_domains}")
+                        return
+
+                # Validate audio file extension
+                ALLOWED_EXTENSIONS = [".mp3", ".wav", ".ogg", ".flac", ".m4a"]
+                if not any(url.lower().endswith(ext) for ext in ALLOWED_EXTENSIONS):
+                    logging.warning(f"URL does not point to audio file: {url}")
                     return
+
+            elif url.startswith("/"):
+                # SECURITY: Restrict local paths to allowed directories
+                ALLOWED_DIRS = ["/opt/pynab/nabmqttd/sounds", "/opt/pynab/sounds"]
+
+                # Resolve absolute path (handles ../ traversal attempts)
+                resolved_path = os.path.abspath(url)
+
+                # Check if path is within allowed directories
+                if not any(resolved_path.startswith(allowed) for allowed in ALLOWED_DIRS):
+                    logging.error(f"Path outside allowed directories: {resolved_path}")
+                    return
+
+                # Validate file exists
+                if not os.path.exists(resolved_path):
+                    logging.warning(f"Local audio file not found: {resolved_path}")
+                    return
+
+                # Use resolved path for security
+                url = resolved_path
             else:
                 raise ValueError(f"Invalid audio path (must be http/https URL or absolute path): {url}")
 

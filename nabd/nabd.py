@@ -441,9 +441,11 @@ class Nabd:
         packet = self.__check_ears_packet(any_packet, writer)
         if packet:
             if "left" in packet:
-                self.ears["left"] = packet["left"]
+                # Clamp to valid range [0-16] to prevent motor damage
+                self.ears["left"] = max(0, min(16, packet["left"]))
             if "right" in packet:
-                self.ears["right"] = packet["right"]
+                # Clamp to valid range [0-16] to prevent motor damage
+                self.ears["right"] = max(0, min(16, packet["right"]))
             if self.state == State.IDLE:
                 if "event" in packet and packet["event"]:
                     # Simulate an ears_event
@@ -1042,8 +1044,9 @@ class Nabd:
             )
             and self.playing_cancelable
         ):
-            asyncio.ensure_future(self.nabio.cancel(True))
+            # Set flag before scheduling cancel to prevent double-cancel
             self.playing_canceled = True
+            asyncio.ensure_future(self.nabio.cancel(True))
         else:
             self.broadcast_event(
                 "button",
@@ -1185,8 +1188,13 @@ class Nabd:
             packet["app"] = app_str
             if app_data is not None:
                 app_data_str_bin = app_data.split(b"\xFF", 1)[0]
-                app_data_str = app_data_str_bin.decode("utf8")
-                packet["data"] = app_data_str
+                try:
+                    app_data_str = app_data_str_bin.decode("utf8")
+                    packet["data"] = app_data_str
+                except UnicodeDecodeError:
+                    # RFID tag contains invalid UTF-8, use hex representation
+                    packet["data"] = app_data_str_bin.hex()
+                    logging.warning(f"RFID tag contains invalid UTF-8 data: {app_data_str_bin.hex()}")
             event_type = "rfid/" + app_str
         if self.state != State.ASLEEP and not flags & TagFlags.REMOVED:
             asyncio.ensure_future(self.nabio.rfid_detected_feedback())

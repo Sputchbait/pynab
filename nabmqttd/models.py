@@ -22,5 +22,11 @@ class Config(singleton_model.SingletonModel):
     voice_on_button = models.BooleanField(default=True)
     asr_language = models.CharField(max_length=5, default="en_US")
 
+    # Audio URL security settings
+    # Comma-separated list of allowed domains for HTTP audio playback
+    # Leave empty ("*") to allow all domains (less secure)
+    # Example: "localhost,192.168.1.195,example.com"
+    allowed_audio_domains = models.TextField(default="localhost,192.168.1.234,192.168.1.195")
+
     class Meta:
         app_label = "nabmqttd"

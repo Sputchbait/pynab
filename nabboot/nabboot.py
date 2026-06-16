@@ -23,22 +23,27 @@ def set_leds(color):
     # (when using NPN transistor level shift)
     LED_CHANNEL = 1  # set to '1' for GPIOs 13, 19, 41, 45 or 53
 
-    strip = Adafruit_NeoPixel(
-        LED_COUNT,
-        LED_PIN,
-        LED_FREQ_HZ,
-        LED_DMA,
-        LED_INVERT,
-        LED_BRIGHTNESS,
-        LED_CHANNEL,
-    )
-    # Intialize the library (must be called once before other functions).
-    strip.begin()
+    try:
+        strip = Adafruit_NeoPixel(
+            LED_COUNT,
+            LED_PIN,
+            LED_FREQ_HZ,
+            LED_DMA,
+            LED_INVERT,
+            LED_BRIGHTNESS,
+            LED_CHANNEL,
+        )
+        # Intialize the library (must be called once before other functions).
+        strip.begin()
 
-    for led in range(6):
-        strip.setPixelColor(led, color)
+        for led in range(LED_COUNT):
+            strip.setPixelColor(led, color)
 
-    strip.show()
+        strip.show()
+    except (RuntimeError, PermissionError, OSError) as e:
+        # NeoPixel initialization can fail if GPIO/PWM access denied or hardware fault
+        # Continue boot without visual feedback rather than crashing
+        print(f"Warning: Failed to initialize LEDs: {e}", file=sys.stderr)
 
 
 def set_system_led(shutdown):
